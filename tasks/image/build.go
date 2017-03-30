@@ -30,6 +30,7 @@ func RunBuild(ctx *context.ExecuteContext, t *Task, hasModifiedDeps bool) (bool,
 		}
 	}
 	t.logger().Debug("is stale")
+	// TODO: check if required fields are set (dockerfile, or steps, and context)
 
 	if err := buildImage(ctx, t); err != nil {
 		return false, err
@@ -83,8 +84,8 @@ func buildIsStale(ctx *context.ExecuteContext, t *Task) (bool, error) {
 
 func buildImage(ctx *context.ExecuteContext, t *Task) error {
 	var err error
-	if t.hasSteps() {
-		err = t.buildImageFromTarBall(ctx)
+	if t.config.Steps != "" {
+		err = t.buildImageFromSteps(ctx)
 	} else {
 		err = t.buildImageFromDockerfile(ctx)
 	}
@@ -99,6 +100,15 @@ func buildImage(ctx *context.ExecuteContext, t *Task) error {
 	return updateImageRecord(recordPath(ctx, t.config), record)
 }
 
+func (t *Task) buildImageFromDockerfile(ctx *context.ExecuteContext) error {
+	return Stream(os.Stdout, func(out io.Writer) error {
+		opts := t.commonBuildImageOptions(ctx, out)
+		opts.Dockerfile = t.config.Dockerfile
+		opts.ContextDir = t.config.Context
+		return ctx.Client.BuildImage(opts)
+	})
+}
+
 func buildArgs(args map[string]string) []docker.BuildArg {
 	out := []docker.BuildArg{}
 	for key, value := range args {
@@ -107,42 +117,29 @@ func buildArgs(args map[string]string) []docker.BuildArg {
 	return out
 }
 
-func (t *Task) buildImageFromDockerfile(ctx *context.ExecuteContext) error {
-	err := Stream(os.Stdout, func(out io.Writer) error {
-		return ctx.Client.BuildImage(docker.BuildImageOptions{
-			Name:           GetImageName(ctx, t.config),
-			Dockerfile:     t.config.Dockerfile,
-			BuildArgs:      buildArgs(t.config.Args),
-			Pull:           t.config.PullBaseImageOnBuild,
-			RmTmpContainer: true,
-			ContextDir:     t.config.Context,
-			OutputStream:   out,
-			RawJSONStream:  true,
-			SuppressOutput: ctx.Quiet,
-			AuthConfigs:    ctx.GetAuthConfigs(),
-		})
-	})
-	return err
+func (t *Task) commonBuildImageOptions(ctx *context.ExecuteContext, out io.Writer) docker.BuildImageOptions {
+	return docker.BuildImageOptions{
+		Name:           GetImageName(ctx, t.config),
+		BuildArgs:      buildArgs(t.config.Args),
+		Pull:           t.config.PullBaseImageOnBuild,
+		RmTmpContainer: true,
+		OutputStream:   out,
+		RawJSONStream:  true,
+		SuppressOutput: ctx.Quiet,
+		AuthConfigs:    ctx.GetAuthConfigs(),
+	}
 }
 
-func (t *Task) buildImageFromTarBall(ctx *context.ExecuteContext) error {
+func (t *Task) buildImageFromSteps(ctx *context.ExecuteContext) error {
 	inputbuf, err := t.writeTarball()
 	if err != nil {
 		return err
 	}
-	err = Stream(os.Stdout, func(out io.Writer) error {
-		return ctx.Client.BuildImage(docker.BuildImageOptions{
-			Name:           GetImageName(ctx, t.config),
-			BuildArgs:      buildArgs(t.config.Args),
-			Pull:           t.config.PullBaseImageOnBuild,
-			RmTmpContainer: true,
-			InputStream:    inputbuf,
-			OutputStream:   out,
-			RawJSONStream:  true,
-			SuppressOutput: ctx.Quiet,
-		})
+	return Stream(os.Stdout, func(out io.Writer) error {
+		opts := t.commonBuildImageOptions(ctx, out)
+		opts.InputStream = inputbuf
+		return ctx.Client.BuildImage(opts)
 	})
-	return err
 }
 
 func (t *Task) writeTarball() (*bytes.Buffer, error) {
@@ -190,8 +187,9 @@ func (t *Task) getTarContext() ([]string, error) {
 }
 func (t *Task) writeDockerfiletoTarBall(tr *tar.Writer) error {
 	rightNow := time.Now()
+	stepBytes := []byte(t.config.Steps)
 	header := &tar.Header{Name: "Dockerfile",
-		Size:       t.getStepsSize(),
+		Size:       int64(len(stepBytes)),
 		ModTime:    rightNow,
 		AccessTime: rightNow,
 		ChangeTime: rightNow,
@@ -200,11 +198,8 @@ func (t *Task) writeDockerfiletoTarBall(tr *tar.Writer) error {
 	if err != nil {
 		return err
 	}
-	for _, val := range t.config.Steps {
-		// its not a good idea to catch this error?
-		tr.Write([]byte(val + "\n"))
-	}
-	return nil
+	_, err = tr.Write(stepBytes)
+	return err
 }
 
 func (t *Task) writeFilesToTarBall(tr *tar.Writer) error {
@@ -244,14 +239,6 @@ func (t *Task) writeFilesToTarBall(tr *tar.Writer) error {
 	return nil
 }
 
-func (t *Task) getStepsSize() int64 {
-	var size int64
-	for _, val := range t.config.Steps {
-		size = size + int64(len([]byte(val+"\n")))
-	}
-	return size
-}
-
 func (t *Task) scanIgnored() ([]string, error) {
 	allIgnored, err := dockerignore.ReadAll()
 	if err != nil {
@@ -279,11 +266,4 @@ func scanRoot2Slice(root string, placeholder []string) ([]string, error) {
 		return nil
 	})
 	return placeholder, err
-}
-
-func (t *Task) hasSteps() bool {
-	if len(t.config.Steps) != 0 {
-		return true
-	}
-	return false
 }

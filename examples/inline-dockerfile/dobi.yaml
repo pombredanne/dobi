@@ -1,0 +1,17 @@
+
+meta:
+  project: inline-dockerfile
+
+
+image=dev:
+  image: example/inline
+  steps: |
+    FROM  alpine:3.5
+    RUN   apk add -U git bash tree
+    RUN   git clone https://github.com/dnepin/dobi /dobi
+    WORKDIR /dobi
+    CMD   tree
+
+job=tree:
+  use: dev
+  interactive: true
