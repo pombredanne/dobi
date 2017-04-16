@@ -7,11 +7,14 @@ image=dev:
   image: example/inline
   steps: |
     FROM  alpine:3.5
-    RUN   apk add -U git bash tree
-    RUN   git clone https://github.com/dnepin/dobi /dobi
-    WORKDIR /dobi
+    RUN   apk add -U tree
+    WORKDIR /work
+    RUN   mkdir a b && touch a/a b/b c d
     CMD   tree
 
 job=tree:
   use: dev
   interactive: true
+
+alias=test:
+  tasks: [tree]

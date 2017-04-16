@@ -19,7 +19,11 @@ import:
   subpackages:
   - nat
 - package: github.com/docker/docker
+  repo: https://github.com/dnephin/docker
+  version: d40c602c5983361a93e966b2634f2df164de2d58
   subpackages:
+  - cli/command/image/build
+  - pkg/archive
   - pkg/jsonmessage
   - pkg/term
   - runconfig/opts

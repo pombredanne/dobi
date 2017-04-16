@@ -5,15 +5,13 @@ import (
 	"os"
 	"strings"
 
-	"archive/tar"
-	"bytes"
 	"io/ioutil"
-	"path/filepath"
-	"time"
 
+	"github.com/dnephin/dobi/config"
 	"github.com/dnephin/dobi/tasks/context"
-	"github.com/dnephin/dobi/utils/dockerignore"
 	"github.com/dnephin/dobi/utils/fs"
+	"github.com/docker/docker/cli/command/image/build"
+	"github.com/docker/docker/pkg/archive"
 	docker "github.com/fsouza/go-dockerclient"
 )
 
@@ -109,14 +107,6 @@ func (t *Task) buildImageFromDockerfile(ctx *context.ExecuteContext) error {
 	})
 }
 
-func buildArgs(args map[string]string) []docker.BuildArg {
-	out := []docker.BuildArg{}
-	for key, value := range args {
-		out = append(out, docker.BuildArg{Name: key, Value: value})
-	}
-	return out
-}
-
 func (t *Task) commonBuildImageOptions(ctx *context.ExecuteContext, out io.Writer) docker.BuildImageOptions {
 	return docker.BuildImageOptions{
 		Name:           GetImageName(ctx, t.config),
@@ -130,140 +120,43 @@ func (t *Task) commonBuildImageOptions(ctx *context.ExecuteContext, out io.Write
 	}
 }
 
+func buildArgs(args map[string]string) []docker.BuildArg {
+	out := []docker.BuildArg{}
+	for key, value := range args {
+		out = append(out, docker.BuildArg{Name: key, Value: value})
+	}
+	return out
+}
+
 func (t *Task) buildImageFromSteps(ctx *context.ExecuteContext) error {
-	inputbuf, err := t.writeTarball()
+	buildContext, dockerfile, err := getBuildContext(t.config)
 	if err != nil {
 		return err
 	}
 	return Stream(os.Stdout, func(out io.Writer) error {
 		opts := t.commonBuildImageOptions(ctx, out)
-		opts.InputStream = inputbuf
+		opts.InputStream = buildContext
+		opts.Dockerfile = dockerfile
 		return ctx.Client.BuildImage(opts)
 	})
 }
 
-func (t *Task) writeTarball() (*bytes.Buffer, error) {
-	inputbuf := bytes.NewBuffer(nil)
-	tr := tar.NewWriter(inputbuf)
-	defer tr.Close()
-	err := t.writeDockerfiletoTarBall(tr)
+func getBuildContext(config *config.ImageConfig) (io.Reader, string, error) {
+	contextDir := config.Context
+	excludes, err := build.ReadDockerignore(contextDir)
 	if err != nil {
-		return inputbuf, err
+		return nil, "", err
 	}
-	err = t.writeFilesToTarBall(tr)
-	if err != nil {
-		return inputbuf, err
-	}
-	return inputbuf, nil
-}
+	if err := build.ValidateContextDirectory(contextDir, excludes); err != nil {
+		return nil, "", err
 
-func (t *Task) getTarContext() ([]string, error) {
-	type Slice []string
-	type Result struct {
-		Slice
-		error
 	}
-	ignored := make(chan *Result)
-	ctx := make(chan *Result)
-	go func() {
-		result := new(Result)
-		result.Slice, result.error = t.scanContext()
-		ctx <- result
-	}()
-	go func() {
-		result := new(Result)
-		result.Slice, result.error = t.scanIgnored()
-		ignored <- result
-	}()
-	ctxFiles := <-ctx
-	if ctxFiles.error != nil {
-		return []string{}, ctxFiles.error
-	}
-	ignoredFiles := <-ignored
-	if ignoredFiles.error != nil {
-		return []string{}, ignoredFiles.error
-	}
-	return dockerignore.Difference(ctxFiles.Slice, ignoredFiles.Slice), nil
-}
-func (t *Task) writeDockerfiletoTarBall(tr *tar.Writer) error {
-	rightNow := time.Now()
-	stepBytes := []byte(t.config.Steps)
-	header := &tar.Header{Name: "Dockerfile",
-		Size:       int64(len(stepBytes)),
-		ModTime:    rightNow,
-		AccessTime: rightNow,
-		ChangeTime: rightNow,
-	}
-	err := tr.WriteHeader(header)
-	if err != nil {
-		return err
-	}
-	_, err = tr.Write(stepBytes)
-	return err
-}
-
-func (t *Task) writeFilesToTarBall(tr *tar.Writer) error {
-	paths, err := t.getTarContext()
-	if err != nil {
-		return err
-	}
-	for _, file := range paths {
-		t.logger().Debugf("is writing %s to tarball", strings.TrimPrefix(file, filepath.Base(t.config.Context)+"/"))
-		fileInfo, err := os.Stat(file)
-		if err != nil {
-			return err
-		}
-		byt, err := ioutil.ReadFile(file)
-		if err != nil {
-			return err
-		}
-		rightNow := time.Now()
-		header := &tar.Header{Name: strings.TrimPrefix(file, filepath.Base(t.config.Context)+"/"),
-			Size:       int64(len(byt)),
-			ModTime:    rightNow,
-			Mode:       int64(fileInfo.Mode()),
-			AccessTime: rightNow,
-			ChangeTime: rightNow,
-		}
-		err = tr.WriteHeader(header)
-		if err != nil {
-			return err
-		}
-
-		_, err = tr.Write(byt)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (t *Task) scanIgnored() ([]string, error) {
-	allIgnored, err := dockerignore.ReadAll()
-	if err != nil {
-		return []string{}, err
-	}
-	var resolvedignores []string
-	for _, val := range allIgnored {
-		resolvedignores, err = scanRoot2Slice(val, resolvedignores)
-		if err != nil {
-			return resolvedignores, err
-		}
-	}
-	return resolvedignores, nil
-}
-
-func (t *Task) scanContext() ([]string, error) {
-	return scanRoot2Slice(t.config.Context, []string{})
-}
-
-func scanRoot2Slice(root string, placeholder []string) ([]string, error) {
-	err := filepath.Walk(root, func(path string, f os.FileInfo, err error) error {
-		if !f.IsDir() {
-			placeholder = append(placeholder, path)
-		}
-		return nil
+	buildCtx, err := archive.TarWithOptions(contextDir, &archive.TarOptions{
+		ExcludePatterns: excludes,
 	})
-	return placeholder, err
+	if err != nil {
+		return nil, "", err
+	}
+	dockerfileCtx := ioutil.NopCloser(strings.NewReader(config.Steps))
+	return build.AddDockerfileToBuildContext(dockerfileCtx, buildCtx)
 }

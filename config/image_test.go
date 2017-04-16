@@ -45,7 +45,7 @@ func (s *ImageConfigSuite) TestValidateMissingOneOfRequired() {
 	conf := NewConfig()
 	err := s.image.Validate(pth.NewPath(""), conf)
 	s.Error(err)
-	s.Contains(err.Error(), "one of dockerfile, steps, or pull is required")
+	s.Contains(err.Error(), "one of dockerfile, steps, context, or pull is required")
 }
 
 func (s *ImageConfigSuite) TestValidateConflictingDockerfileAndSteps() {

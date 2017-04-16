@@ -78,8 +78,8 @@ func (c *ImageConfig) Validate(path pth.Path, config *Config) *pth.Error {
 
 func (c *ImageConfig) validateBuildOrPull() error {
 	switch {
-	case c.Dockerfile == "" && c.Steps == "" && !c.Pull.IsSet():
-		return errors.New("one of dockerfile, steps, or pull is required")
+	case c.Dockerfile == "" && c.Steps == "" && c.Context == "" && !c.Pull.IsSet():
+		return errors.New("one of dockerfile, steps, context, or pull is required")
 	case c.Dockerfile != "" && c.Steps != "":
 		return errors.New("dockerfile can not be used with steps")
 	}
